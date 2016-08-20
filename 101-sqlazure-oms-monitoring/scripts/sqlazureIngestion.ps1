@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $StartTime = [dateTime]::Now.Subtract([TimeSpan]::FromMinutes(5))
 
 #Replace the below string with a metric value name such as 'TimeStamp' to update TimeGenerated to be that metric named instead of ingestion time
-$Timestampfield = "Timestamp" 
+$Timestampfield = "" 
 
 #Update customer Id to your Operational Insights workspace ID
 $customerID = Get-AutomationVariable -Name 'OPSINSIGHTS_WS_ID'
@@ -44,6 +44,7 @@ $SQLServers = Find-AzureRmResource -ResourceType Microsoft.Sql/servers
 # Process each retrieved SQL Server in list
 # Do not process if SQL Server listing is $null  
 $DBCount = 0
+$FailedConnections = @()
 if($SQLServers -ne $Null)
 {
 	foreach($SQLServer in $SQLServers)
@@ -61,7 +62,25 @@ if($SQLServers -ne $Null)
                 {
                     $DBCount++
                     $Metrics = @()
-                    $Metrics = $Metrics + (Get-AzureRmMetric -ResourceId $db.ResourceId -TimeGrain ([TimeSpan]::FromMinutes(5)) -StartTime $StartTime)
+                    
+                    if($db.ElasticPoolName -ne $Null)
+                    {
+                        $elasticPool = $db.ElasticPoolName
+                    }
+                    else
+                    {
+                        $elasticPool = "none"
+                    }                    
+
+                    try
+                    {
+                        $Metrics = $Metrics + (Get-AzureRmMetric -ResourceId $db.ResourceId -TimeGrain ([TimeSpan]::FromMinutes(5)) -StartTime $StartTime)
+					}
+                    catch
+                    {
+						# Add up failed connections due to offline or access denied
+						$FailedConnections = $FailedConnections + "Failed to connect to $($db.DatabaseName) on SQL Server $($db.ServerName)"
+					}
 					
 				    # Format metrics into a table.
                     $table = @()
@@ -69,18 +88,18 @@ if($SQLServers -ne $Null)
                     { 
                         foreach($metricValue in $metric.MetricValues)
                         {
-                            $sx = New-Object PSObject -Property @{
-                                Timestamp = $metricValue.Timestamp.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+							$sx = New-Object PSObject -Property @{
+								Timestamp = $metricValue.Timestamp.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
                                 MetricName = $metric.Name; 
                                 Average = $metricValue.Average;
                                 SubscriptionID = $Conn.SubscriptionID;
                                 ResourceGroup = $db.ResourceGroupName;
                                 ServerName = $SQLServer.Name;
                                 DatabaseName = $db.DatabaseName;
-		                        ElasticPoolName = $db.ElasticPoolName
+		                        ElasticPoolName = $elasticPool
                             }
                             $table = $table += $sx
-                        }
+                        } 
                     # Convert table to a JSON document for ingestion 
 				    $jsonTable = ConvertTo-Json -InputObject $table
                     }
@@ -94,4 +113,10 @@ if($SQLServers -ne $Null)
 	}		
 }
 "Total DBs processed $DBCount"
-#endregion
+if($FailedConnections -ne $Null)
+{
+    ""
+    "Failed to connect to $($FailedConnections.Count) databases"
+    $FailedConnections
+}
+#endregion 
